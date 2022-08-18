@@ -20,7 +20,7 @@ go get -u github.com/dwkim606/test_lattigo
 
 0. Dataset Preparation: **Necessary** to run the tests  
 
-- Download the data file from the link:   
+- Download the data file from the link: https://drive.google.com/drive/folders/1zLTzJ58E_CDtqvnPv8t9YtgkDaHouWWn?usp=sharing  
 - Move all folders (Resnet_enc_results, Resnet_plain_data, Resnet_weights, test_conv_data) to the same directory as the source code.  
 
 
