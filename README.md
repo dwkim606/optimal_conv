@@ -12,7 +12,7 @@ apt-get install golang-go
 go get -u golang.org/x/crypto/...
 go get -u github.com/dwkim606/test_lattigo
 ```  
-**CAUTION**: For Lattigo, we must install the <em>forked version</em> with above command, instead of the latest [one](https://github.com/tuneinsight/lattigo)  
+**CAUTION**: For Lattigo, we must install the <em>forked version</em> with above command (instead of the latest [one](https://github.com/tuneinsight/lattigo))  
 
 3. Python3 with numpy package (required only for checking the precision of CNN classifier)   
 
@@ -20,7 +20,7 @@ go get -u github.com/dwkim606/test_lattigo
 
 0. Dataset Preparation: **Necessary** to run the tests  
 
-- Link to the data file:   
+- Download the data file from the link:   
 - Move all folders (Resnet_enc_results, Resnet_plain_data, Resnet_weights, test_conv_data) to the same directory as the source code.  
 
 
