@@ -26,19 +26,19 @@ type context struct {
 	in_wids []int // input widths including padding
 	kp_wids []int // keep widths among input widths
 	// pads           map[int]int
-	ext_idx        map[int][][]int         // ext_idx for keep_vec (saved for each possible input width) map: in_wid, [up/low]
-	r_idx          map[int][]map[int][]int // r_idx for compr_vec (or ext_vec) map: in_wid [pos] map: rot
-	r_idx_l        map[int][]map[int][]int // low, r_idx for compr_vec (or ext_vec) map: in_wid [pos] map: rot
-	m_idx          map[int][]map[int][]int // m_idx , map: in_wid [pos] map: rot
-	m_idx_l        map[int][]map[int][]int // low, m_idx , map: in_wid [pos] map: rot
-	pl_idx         []*ckks.Plaintext
-	params         ckks.Parameters
-	encoder        ckks.Encoder
-	encryptor      ckks.Encryptor
-	decryptor      ckks.Decryptor
-	evaluator      ckks.Evaluator
-	pack_evaluator ckks.Evaluator
-	btp            *ckks.Bootstrapper
+	ext_idx                                    map[int][][]int         // ext_idx for keep_vec (saved for each possible input width) map: in_wid, [up/low]
+	r_idx                                      map[int][]map[int][]int // r_idx for compr_vec (or ext_vec) map: in_wid [pos] map: rot
+	r_idx_l                                    map[int][]map[int][]int // low, r_idx for compr_vec (or ext_vec) map: in_wid [pos] map: rot
+	m_idx                                      map[int][]map[int][]int // m_idx , map: in_wid [pos] map: rot
+	m_idx_l                                    map[int][]map[int][]int // low, m_idx , map: in_wid [pos] map: rot
+	pl_idx                                     []*ckks.Plaintext
+	params, params2, params3, params4, params5 ckks.Parameters
+	encoder                                    ckks.Encoder
+	encryptor                                  ckks.Encryptor
+	decryptor                                  ckks.Decryptor
+	evaluator                                  ckks.Evaluator
+	pack_evaluator                             ckks.Evaluator
+	btp, btp2, btp3, btp4, btp5                *ckks.Bootstrapper // many btps for sparse boots
 }
 
 func newContext(logN, ker_wid int, in_wids, kp_wids []int, boot bool, kind string) *context {
@@ -56,6 +56,30 @@ func newContext(logN, ker_wid int, in_wids, kp_wids []int, boot bool, kind strin
 	cont.params, err = btpParams.Params()
 	if err != nil {
 		panic(err)
+	}
+	if (kind == "Resnet_crop_sparse") || (kind == "Resnet_crop_sparse_wide2") || (kind == "Resnet_crop_sparse_wide3") || (kind == "Imagenet_sparse") { // generate 2 more params for sparse boot (logSlots, -1, -2)
+		btpParams.LogN = 16
+		btpParams.LogSlots = btpParams.LogN - 1
+		if cont.params, err = btpParams.Params(); err != nil {
+			panic(err)
+		}
+		btpParams.LogSlots = btpParams.LogN - 2
+		if cont.params2, err = btpParams.Params(); err != nil {
+			panic(err)
+		}
+		btpParams.LogSlots = btpParams.LogN - 3
+		if cont.params3, err = btpParams.Params(); err != nil {
+			panic(err)
+		}
+		btpParams.LogSlots = btpParams.LogN - 4
+		if cont.params4, err = btpParams.Params(); err != nil {
+			panic(err)
+		}
+		btpParams.LogSlots = btpParams.LogN - 5
+		if cont.params5, err = btpParams.Params(); err != nil {
+			panic(err)
+		}
+		btpParams.LogSlots = btpParams.LogN - 1
 	}
 
 	fmt.Printf("CKKS parameters: logN = %d, logSlots = %d, h = %d, logQP = %d, levels = %d, scale= 2^%f, sigma = %f \n",
@@ -108,6 +132,133 @@ func newContext(logN, ker_wid int, in_wids, kp_wids []int, boot bool, kind strin
 			cont.ext_idx[step] = make([][]int, iter)
 			for ul := 0; ul < iter; ul++ {
 				cont.ext_idx[step][ul] = gen_keep_vec_stride(cont.N/2, cont.in_wids[0], cont.kp_wids[i], step, ul, raw_in_wid_odd)
+			}
+		}
+	case "Resnet_crop_sparse", "Resnet_crop_sparse_wide2", "Resnet_crop_sparse_wide3": // Generate ext_idx for extracting valid values from conv with "same" padding
+		// !! ALSO NEEDS to extract values after strided conv!
+		iter = 2 // since we use full padding,
+		log_sparse := 2
+		if kind == "Resnet_crop_sparse_wide2" {
+			log_sparse = 1
+		} else if kind == "Resnet_crop_sparse_wide3" {
+			log_sparse = 0
+		}
+		for i := range cont.in_wids {
+			raw_in_wid_odd := true
+			if cont.kp_wids[i]%2 == 0 {
+				raw_in_wid_odd = false
+			}
+			_ = raw_in_wid_odd
+			// println("i, odd? ", i, raw_in_wid_odd)
+			cont.ext_idx[cont.in_wids[i]] = make([][]int, iter)
+			for ul := 0; ul < iter; ul++ {
+				if (kind == "Resnet_crop_sparse_wide3") && (log_sparse == 0) {
+					cont.ext_idx[cont.in_wids[i]][ul] = gen_keep_vec(cont.N/2, cont.in_wids[i], cont.kp_wids[i], ul)
+				} else {
+					cont.ext_idx[cont.in_wids[i]][ul] = gen_keep_vec_sparse(cont.N/2, cont.in_wids[i], cont.kp_wids[i], log_sparse)
+				}
+			}
+			log_sparse += 1
+		}
+		// for first block (stride)
+		elt := cont.in_wids[0]
+		cont.r_idx[elt] = make([]map[int][]int, 1)
+		cont.r_idx_l[elt] = make([]map[int][]int, 1)
+		cont.m_idx[elt] = make([]map[int][]int, 1)
+		cont.m_idx_l[elt] = make([]map[int][]int, 1)
+		pos := 0
+		log_sparse = 1
+		if (kind == "Resnet_crop_sparse_wide2") || (kind == "Resnet_crop_sparse_wide3") {
+			log_sparse = 0
+			cont.m_idx_l[elt][pos], cont.r_idx_l[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[1], log_sparse, 1, pos) // need lower part for full packing
+
+			// if kind == "Resnet_crop_sparse_wide3" {
+			// 	pos = 2
+			// 	cont.m_idx_l[elt][pos], cont.r_idx_l[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[1], log_sparse, 1, pos) // need lower part for full packing
+			// 	cont.m_idx[elt][pos], cont.r_idx[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[1], log_sparse, 1, pos)     // need lower part for full packing
+			// 	pos = 0
+			// }
+		}
+		cont.m_idx[elt][pos], cont.r_idx[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[1], log_sparse, 0, pos)
+
+		for pos := 0; pos < 1; pos++ {
+			for k := range cont.r_idx[elt][pos] {
+				rotations = append(rotations, k)
+			}
+			for k := range cont.r_idx_l[elt][pos] {
+				rotations = append(rotations, k)
+			}
+			for k := range cont.m_idx[elt][pos] {
+				rotations = append(rotations, k)
+			}
+			for k := range cont.m_idx_l[elt][pos] {
+				rotations = append(rotations, k)
+			}
+		}
+
+		// for 2nd block (stride)
+		elt = cont.in_wids[1]
+		cont.r_idx[elt] = make([]map[int][]int, 1)
+		cont.r_idx_l[elt] = make([]map[int][]int, 1)
+		cont.m_idx[elt] = make([]map[int][]int, 1)
+		cont.m_idx_l[elt] = make([]map[int][]int, 1)
+		pos = 0
+		if (kind == "Resnet_crop_sparse") || (kind == "Resnet_crop_sparse_wide2") {
+			log_sparse += 1
+		} else {
+			cont.m_idx_l[elt][pos], cont.r_idx_l[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[2], log_sparse, 1, pos) // need lower part for full pakcin in wid3 case
+		}
+		cont.m_idx[elt][pos], cont.r_idx[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[2], log_sparse, 0, pos)
+
+		for k := range cont.r_idx[elt][pos] {
+			rotations = append(rotations, k)
+		}
+		for k := range cont.r_idx_l[elt][pos] {
+			rotations = append(rotations, k)
+		}
+		for k := range cont.m_idx[elt][pos] {
+			rotations = append(rotations, k)
+		}
+		for k := range cont.m_idx_l[elt][pos] {
+			rotations = append(rotations, k)
+		}
+	case "Imagenet_sparse":
+		iter = 2 // since we use full padding,
+		log_sparse := 0
+		for i := range cont.in_wids {
+			cont.ext_idx[cont.in_wids[i]] = make([][]int, iter)
+			for ul := 0; ul < iter; ul++ {
+				if log_sparse == 0 {
+					cont.ext_idx[cont.in_wids[i]][ul] = gen_keep_vec(cont.N/2, cont.in_wids[i], cont.kp_wids[i], ul)
+				} else {
+					cont.ext_idx[cont.in_wids[i]][ul] = gen_keep_vec_sparse(cont.N/2, cont.in_wids[i], cont.kp_wids[i], log_sparse)
+				}
+			}
+			log_sparse += 1
+		}
+		// for the first block (stride)
+		elt := cont.in_wids[0]
+		cont.r_idx[elt] = make([]map[int][]int, 1)
+		cont.r_idx_l[elt] = make([]map[int][]int, 1)
+		cont.m_idx[elt] = make([]map[int][]int, 1)
+		cont.m_idx_l[elt] = make([]map[int][]int, 1)
+		pos := 0
+		log_sparse = 0
+		cont.m_idx_l[elt][pos], cont.r_idx_l[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[1], log_sparse, 1, pos) // need lower part for full packing
+		cont.m_idx[elt][pos], cont.r_idx[elt][pos] = gen_comprs_sparse(cont.N/2, elt, cont.kp_wids[1], log_sparse, 0, pos)
+
+		for pos := 0; pos < 1; pos++ {
+			for k := range cont.r_idx[elt][pos] {
+				rotations = append(rotations, k)
+			}
+			for k := range cont.r_idx_l[elt][pos] {
+				rotations = append(rotations, k)
+			}
+			for k := range cont.m_idx[elt][pos] {
+				rotations = append(rotations, k)
+			}
+			for k := range cont.m_idx_l[elt][pos] {
+				rotations = append(rotations, k)
 			}
 		}
 	case "Resnet_crop_fast_wide2": // Generate ext_idx for extracting valid values from conv with "same" padding
@@ -313,11 +464,38 @@ func newContext(logN, ker_wid int, in_wids, kp_wids []int, boot bool, kind strin
 	if boot {
 		fmt.Println("Generating bootstrapping keys...")
 		rotations = btpParams.RotationsForBootstrapping(cont.params.LogSlots())
+		if (kind == "Resnet_crop_sparse") || (kind == "Resnet_crop_sparse_wide2") || (kind == "Resnet_crop_sparse_wide3") || (kind == "Imagenet_sparse") {
+			rotations = append(rotations, btpParams.RotationsForBootstrapping(cont.params2.LogSlots())...)
+			rotations = append(rotations, btpParams.RotationsForBootstrapping(cont.params3.LogSlots())...)
+			rotations = append(rotations, btpParams.RotationsForBootstrapping(cont.params4.LogSlots())...)
+			rotations = append(rotations, btpParams.RotationsForBootstrapping(cont.params5.LogSlots())...)
+		}
 		rotkeys = kgen.GenRotationKeysForRotations(rotations, true, sk)
 		btpKey := ckks.BootstrappingKey{Rlk: rlk, Rtks: rotkeys}
 
 		if kind == "BL_Conv" {
 			if cont.btp, err = ckks.NewBootstrapper(cont.params, btpParams, btpKey); err != nil {
+				panic(err)
+			}
+		} else if (kind == "Resnet_crop_sparse") || (kind == "Resnet_crop_sparse_wide2") || (kind == "Resnet_crop_sparse_wide3") || (kind == "Imagenet_sparse") {
+			btpParams.LogSlots = btpParams.LogN - 1
+			if cont.btp, err = ckks.NewBootstrapper_mod(cont.params, btpParams, btpKey); err != nil {
+				panic(err)
+			}
+			btpParams.LogSlots = btpParams.LogN - 2
+			if cont.btp2, err = ckks.NewBootstrapper_mod(cont.params2, btpParams, btpKey); err != nil {
+				panic(err)
+			}
+			btpParams.LogSlots = btpParams.LogN - 3
+			if cont.btp3, err = ckks.NewBootstrapper_mod(cont.params3, btpParams, btpKey); err != nil {
+				panic(err)
+			}
+			btpParams.LogSlots = btpParams.LogN - 4
+			if cont.btp4, err = ckks.NewBootstrapper_mod(cont.params4, btpParams, btpKey); err != nil {
+				panic(err)
+			}
+			btpParams.LogSlots = btpParams.LogN - 5
+			if cont.btp5, err = ckks.NewBootstrapper_mod(cont.params5, btpParams, btpKey); err != nil {
 				panic(err)
 			}
 		} else {
@@ -332,10 +510,69 @@ func newContext(logN, ker_wid int, in_wids, kp_wids []int, boot bool, kind strin
 }
 
 func main() {
+	// fmt.Println("Test Start")
+	// input := make([]float64, 16*16*128)
+	// log_input := 0
+	// for ; (1 << log_input) < len(input); log_input++ {
+	// }
+	// in_wid := 16
+	// kp_wid := 6
+	// log_sparse := 1 // not 0
+	// for i := range input {
+	// 	input[i] = 1.0 * float64(i+1)
+	// }
+	// prt_mat_norm(input, len(input)/(in_wid*in_wid), 1<<log_sparse, 0, false)
+	// br_input := make([]float64, len(input)/2)
+	// br_input0 := make([]float64, len(input)/2)
+	// br_input1 := make([]float64, len(input)/2)
+
+	// for i := range br_input0 {
+	// 	br_input0[i] = input[reverseBits(uint32(i), log_input-1)]
+	// 	br_input1[i] = input[reverseBits(uint32(i), log_input-1)+uint32(len(input)/2)]
+	// }
+	// fmt.Println(br_input0)
+	// fmt.Println(br_input1)
+
+	// pos := 0
+	// br_output0 := make([]float64, len(input)/2)
+	// br_output1 := make([]float64, len(input)/2)
+	// output := make([]float64, len(input))
+	// if log_sparse != 0 {
+	// 	for i := 0; i < len(input)/(1<<(log_sparse+1)); i++ {
+	// 		br_input[i] = br_input0[i]
+	// 		br_input[i+len(input)/(1<<(log_sparse+1))] = br_input1[i]
+	// 	}
+	// 	fmt.Println(br_input)
+	// 	br_output := comprs_vec_sparse(br_input, in_wid, kp_wid, log_sparse, 0, pos)
+	// 	for i := 0; i < len(input)/(1<<(log_sparse+1)); i++ {
+	// 		br_output0[i] = br_output[i]
+	// 		br_output1[i] = br_output[i+len(input)/(1<<(log_sparse+1))]
+	// 	}
+	// 	fmt.Println(len(input) / (1 << (log_sparse + 1)))
+	// 	fmt.Println(br_output)
+	// 	fmt.Println(br_output0)
+	// 	fmt.Println(br_output1)
+	// } else {
+	// 	br_output0 = comprs_vec_sparse(br_input0, in_wid, kp_wid, log_sparse, 0, pos)
+	// 	br_output1 = comprs_vec_sparse(br_input1, in_wid, kp_wid, log_sparse, 1, pos)
+	// }
+
+	// for i := 0; i < len(output)/2; i++ {
+	// 	output[i] = br_output0[reverseBits(uint32(i), log_input-1)]
+	// 	output[i+len(output)/2] = br_output1[reverseBits(uint32(i), log_input-1)]
+	// }
+
+	// fmt.Println("out:")
+	// prt_mat_norm(output, len(output)/(in_wid*in_wid/4), 1<<(log_sparse), 0, false)
+	// fmt.Println(output)
+	// os.Exit(1)
+
 	// st, _ := strconv.Atoi(os.Args[1])
 	// end, _ := strconv.Atoi(os.Args[2])
 	// ker, _ := strconv.Atoi(os.Args[3])
 	// testImagenet_final_fast_in(st, end, ker)
+	// testImagenet_sparse(st, end, ker)
+	// os.Exit(1)
 
 	// Test Conv Boot & NoBoot FINAL!
 	batchs := [5]int{4, 16, 64, 256, 1024}
@@ -379,9 +616,16 @@ func main() {
 
 		debug := false // if turned on, it shows all intermediate input
 		if wide_case == 1 {
-			testResNet_crop_fast_in(0, test_num, ker_wid, depth, debug, cf100)
+			// test with small inputs
+			testResNet_crop_sparse(0, test_num, ker_wid, depth, debug, cf100)
+			// end test with small inputs
+			// testResNet_crop_fast_in(0, test_num, ker_wid, depth, debug, cf100)
+		} else if (wide_case == 2) || (wide_case == 3) {
+			testResNet_crop_sparse_wide(0, test_num, ker_wid, depth, wide_case, debug, cf100)
+			// testResNet_crop_sparse_wide_test(0, test_num, ker_wid, depth, wide_case, debug, cf100)
+			// testResNet_crop_fast_wide_in(0, test_num, ker_wid, depth, wide_case, debug, cf100)
 		} else {
-			testResNet_crop_fast_wide_in(0, test_num, ker_wid, depth, wide_case, debug, cf100)
+			panic("Wrong wide case!")
 		}
 
 	} else {
@@ -402,7 +646,16 @@ func main() {
 
 func printDebugCfs(params ckks.Parameters, ciphertext *ckks.Ciphertext, valuesWant []float64, decryptor ckks.Decryptor, encoder ckks.Encoder) (valuesTest []float64) {
 	total_size := make([]int, 15)
-	valuesTest = encoder.DecodeCoeffs(decryptor.DecryptNew(ciphertext))
+
+	valuesTest_pre := encoder.DecodeCoeffs(decryptor.DecryptNew(ciphertext))
+	valuesTest = make([]float64, 2*params.Slots())
+	step := len(valuesTest_pre) / len(valuesTest) // to cover cases with less slots (N/2 => 1, N/4 => 2, ...)
+	for i := range valuesTest {
+		valuesTest[i] = valuesTest_pre[i*step]
+	}
+
+	fmt.Println("len val Want:", len(valuesWant))
+	fmt.Println("len val Test:", len(valuesTest))
 
 	fmt.Println()
 	fmt.Printf("Level: %d (logQ = %d)\n", ciphertext.Level(), params.LogQLvl(ciphertext.Level()))
@@ -414,16 +667,18 @@ func printDebugCfs(params ckks.Parameters, ciphertext *ckks.Ciphertext, valuesWa
 	fmt.Printf("... \n")
 	fmt.Printf("ValuesWant:")
 	for i := range total_size {
-		fmt.Printf("%6.10f, ", valuesWant[i])
+		fmt.Printf("%6.10f, ", valuesWant[i*step])
 	}
 	fmt.Printf("... \n")
 
-	valuesWantC := make([]complex128, len(valuesWant))
 	valuesTestC := make([]complex128, len(valuesTest))
-	for i := range valuesWantC {
-		valuesWantC[i] = complex(valuesWant[i], 0)
+	valuesWantC := make([]complex128, len(valuesWant)/step)
+
+	for i := range valuesTestC {
 		valuesTestC[i] = complex(valuesTest[i], 0)
+		valuesWantC[i] = complex(valuesWant[i*step], 0)
 	}
+
 	precStats := ckks.GetPrecisionStats(params, encoder, nil, valuesWantC[:params.Slots()], valuesTestC[:params.Slots()], params.LogSlots(), 0)
 
 	fmt.Println(precStats.String())
@@ -461,13 +716,26 @@ func printDebugCfsPlain(valuesTest, valuesWant []float64) {
 	fmt.Println()
 }
 
-func printDebug(params ckks.Parameters, ciphertext *ckks.Ciphertext, valuesWant []complex128, decryptor ckks.Decryptor, encoder ckks.Encoder) (valuesTest []complex128) {
+// decrypt ciphertext then compare with valuesWant, then output the msgs to valuesTest
+// log_sparse = 0 -> full slot & TWO ciphertexts
+// log_sparse = 1 -> full/2 & ONE ciphertext
+func printDebug(log_sparse int, params ckks.Parameters, ciphertext *ckks.Ciphertext, valuesWant []complex128, decryptor ckks.Decryptor, encoder ckks.Encoder) (valuesTest []complex128) {
 	total_size := make([]int, 15)
-	valuesTest = encoder.Decode(decryptor.DecryptNew(ciphertext), params.LogSlots())
+	if ciphertext == nil {
+		return nil
+		// valuesTest = make([]complex128, params.Slots()/(1<<log_sparse))
+		// for i := range valuesTest {
+		// 	valuesTest[i] = 0.0
+		// }
+	} else if log_sparse == 0 {
+		valuesTest = encoder.Decode(decryptor.DecryptNew(ciphertext), params.LogSlots())
+	} else {
+		valuesTest = encoder.Decode(decryptor.DecryptNew(ciphertext), params.LogSlots()-(log_sparse-1))
+	}
 
 	fmt.Println()
-	fmt.Printf("Level: %d (logQ = %d)\n", ciphertext.Level(), params.LogQLvl(ciphertext.Level()))
-	fmt.Printf("Scale: 2^%f\n", math.Log2(ciphertext.Scale))
+	// fmt.Printf("Level: %d (logQ = %d)\n", ciphertext.Level(), params.LogQLvl(ciphertext.Level()))
+	// fmt.Printf("Scale: 2^%f\n", math.Log2(ciphertext.Scale))
 	fmt.Printf("ValuesTest:")
 	for i := range total_size {
 		fmt.Printf("%6.5f, ", real(valuesTest[i]))
